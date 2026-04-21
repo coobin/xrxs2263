@@ -1,0 +1,13 @@
+services:
+  xrxs-263-sync:
+    build: .
+    container_name: xrxs-263-sync
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      TZ: Asia/Shanghai
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/data
