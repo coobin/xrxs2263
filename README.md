@@ -15,7 +15,7 @@
 - 支持姓名例外名单，适合保留 263 中少数重名用户的备注显示名。
 - 支持 263 限流错误 `-1042` 自动退避重试。
 - 容器启动时自动同步一次，之后按配置周期定时同步。
-- 提供 `/healthz`、`/config`、`/sync`、`/sso-url` 接口。
+- 内置 `/healthz`、`/config`、`/sync`、`/sso-url` 接口；默认不暴露到宿主机端口。
 - 使用 SQLite 保存部门和用户映射状态。
 - 输出中文同步摘要日志，方便排查每轮同步结果。
 
@@ -71,10 +71,13 @@ DRY_RUN=true
 docker compose -f docker-compose.yml.example up --build
 ```
 
-手动触发一次同步：
+默认情况下，容器启动后会自动同步一次，之后按 `SYNC_INTERVAL_MINUTES` 定时同步。
+
+如果需要手动触发同步，可以临时在 compose 中增加端口映射，或进入容器内部执行请求：
 
 ```bash
-curl -X POST http://127.0.0.1:8000/sync
+docker compose -f docker-compose.yml.example exec xrxs-263-sync \
+  python -c "import requests; print(requests.post('http://127.0.0.1:8000/sync').json())"
 ```
 
 确认返回结果和后台变化符合预期后，再切换正式同步：
@@ -173,8 +176,8 @@ TIMEZONE=Asia/Shanghai
 ## 部署建议
 
 1. 先用 `DRY_RUN=true` 跑一次。
-2. 检查 `/sync` 返回结果。
-3. 检查 263 后台部门和用户是否符合预期。
+2. 检查启动同步日志和 263 后台结果。
+3. 确认部门和用户变化符合预期。
 4. 确认无误后切换 `DRY_RUN=false`。
 5. 生产环境建议先保持 `SYNC_DISABLE_ABSENT_USERS=false` 和 `SYNC_DELETE_ABSENT_USERS=false`。
 6. 观察几轮定时同步日志后，再决定是否开启更激进的账号处理策略。

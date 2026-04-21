@@ -7,7 +7,5 @@ services:
       - .env
     environment:
       TZ: Asia/Shanghai
-    ports:
-      - "8000:8000"
     volumes:
       - ./data:/data
