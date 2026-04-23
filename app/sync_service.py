@@ -34,6 +34,7 @@ class SyncService:
             "users_updated": [],
             "users_disabled": [],
             "users_skipped_unmatched": [],
+            "users_skipped_disabled_departed": [],
         }
         source_departments = self.source_client.list_departments()
         source_users = self.source_client.list_users(source_departments)
@@ -42,7 +43,7 @@ class SyncService:
 
         stats = SyncStats()
         department_mapping = self._sync_departments(source_departments, target_departments, stats, summary)
-        self._sync_users(source_users, target_users, department_mapping, stats, summary)
+        self._sync_users(source_users, target_users, target_departments, department_mapping, stats, summary)
 
         result = {
             "dry_run": self.settings.dry_run,
@@ -160,11 +161,13 @@ class SyncService:
         self,
         source_users: list[SourceUser],
         target_users: list[Mail263User],
+        target_departments: list[Mail263Department],
         department_mapping: dict[str, str],
         stats: SyncStats,
         summary: dict[str, list[str]],
     ) -> None:
         target_by_userid = {user.userid: user for user in target_users}
+        target_department_names = {dept.department_id: dept.name for dept in target_departments}
         source_userids: set[str] = set()
 
         for source_user in source_users:
@@ -198,6 +201,18 @@ class SyncService:
                 )
                 summary["users_created"].append(f"{source_user.full_name}<{userid}>")
                 stats.users_created += 1
+                continue
+
+            if self._is_disabled_departed_backup_user(current, target_department_names):
+                LOGGER.info(
+                    "skip disabled 263 user in departed backup department: userid=%s email=%s departments=%s",
+                    userid,
+                    source_user.email,
+                    current.department_ids,
+                )
+                summary["users_skipped_disabled_departed"].append(
+                    f"{current.full_name or source_user.full_name}<{userid}>"
+                )
                 continue
 
             desired_full_name = self._desired_full_name(userid, source_user.full_name, current.full_name)
@@ -294,6 +309,7 @@ class SyncService:
         self._log_summary_examples("本轮更新用户", summary["users_updated"])
         self._log_summary_examples("本轮禁用用户", summary["users_disabled"])
         self._log_summary_examples("本轮跳过的未匹配 263 账号", summary["users_skipped_unmatched"])
+        self._log_summary_examples("本轮跳过的离职待备份禁用账号", summary["users_skipped_disabled_departed"])
 
     @staticmethod
     def _log_summary_examples(label: str, items: list[str], limit: int = 8) -> None:
@@ -310,3 +326,9 @@ class SyncService:
             if target_id:
                 return target_id
         return "-1"
+
+    @staticmethod
+    def _is_disabled_departed_backup_user(user: Mail263User, department_names: dict[str, str]) -> bool:
+        if user.status != 0:
+            return False
+        return any(department_names.get(department_id) == "离职待备份" for department_id in user.department_ids)
