@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import asdict
 
 from app.config import Settings
@@ -10,6 +11,11 @@ from app.state import StateStore
 from app.xrxs_client import XrxsClient
 
 LOGGER = logging.getLogger(__name__)
+
+# 263 创建部门要求名称为 1-64 位英文或汉字且不含 &<>（errcode=-1031），
+# 送往 263 前去掉中文、英文、数字以外的字符。
+DEPARTMENT_NAME_INVALID_CHARS = re.compile(r"[^0-9A-Za-z一-鿿]")
+DEPARTMENT_NAME_MAX_LENGTH = 64
 
 
 class SyncService:
@@ -32,6 +38,7 @@ class SyncService:
         summary: dict[str, list[str]] = {
             "departments_created": [],
             "departments_updated": [],
+            "departments_failed": [],
             "users_created": [],
             "users_updated": [],
             "users_disabled": [],
@@ -69,11 +76,24 @@ class SyncService:
         existing_mapping = self.state_store.get_department_mapping()
         by_target_id = {dept.department_id: dept for dept in target_departments}
         created_mapping: dict[str, str] = dict(existing_mapping)
+        failed_source_ids: set[str] = set()
 
         remaining = {dept.source_id: dept for dept in source_departments}
         while remaining:
             progressed = False
             for source_id, source_dept in list(remaining.items()):
+                if source_dept.parent_source_id in failed_source_ids:
+                    LOGGER.error(
+                        "department skipped because parent failed: name=%s source_id=%s parent_source_id=%s",
+                        source_dept.name,
+                        source_id,
+                        source_dept.parent_source_id,
+                    )
+                    summary["departments_failed"].append(source_dept.name)
+                    failed_source_ids.add(source_id)
+                    del remaining[source_id]
+                    progressed = True
+                    continue
                 if source_dept.parent_source_id:
                     parent_target_id = created_mapping.get(source_dept.parent_source_id)
                     if parent_target_id is None:
@@ -81,16 +101,36 @@ class SyncService:
                 else:
                     parent_target_id = "0"
 
+                desired_name = self._sanitize_department_name(source_dept.name)
+                if desired_name != source_dept.name:
+                    LOGGER.info(
+                        "department name sanitized: %s -> %s source_id=%s",
+                        source_dept.name,
+                        desired_name,
+                        source_id,
+                    )
+                if not desired_name:
+                    LOGGER.error(
+                        "department name empty after sanitization, skip subtree: name=%s source_id=%s",
+                        source_dept.name,
+                        source_id,
+                    )
+                    summary["departments_failed"].append(source_dept.name)
+                    failed_source_ids.add(source_id)
+                    del remaining[source_id]
+                    progressed = True
+                    continue
+
                 target_id = created_mapping.get(source_id)
                 description = f"synced_from_xrxs:{source_id}"
 
                 if not target_id:
-                    matched = self._find_department_by_name(target_departments, source_dept.name, parent_target_id)
+                    matched = self._find_department_by_name(target_departments, desired_name, parent_target_id)
                     if matched:
                         target_id = matched.department_id
                         LOGGER.info(
                             "department matched: name=%s source_id=%s target_id=%s parent_target_id=%s",
-                            source_dept.name,
+                            desired_name,
                             source_id,
                             target_id,
                             parent_target_id,
@@ -99,46 +139,74 @@ class SyncService:
                         if self.settings.dry_run:
                             target_id = f"dry-run-{source_id}"
                         else:
-                            target_id = str(
-                                self.target_client.create_department(
-                                    name=source_dept.name,
-                                    parent_id=int(parent_target_id),
-                                    description=description,
+                            try:
+                                target_id = str(
+                                    self.target_client.create_department(
+                                        name=desired_name,
+                                        parent_id=int(parent_target_id),
+                                        description=description,
+                                    )
                                 )
-                            )
+                            except RuntimeError:
+                                LOGGER.exception(
+                                    "department create failed, skip subtree: name=%s source_id=%s parent_target_id=%s",
+                                    desired_name,
+                                    source_id,
+                                    parent_target_id,
+                                )
+                                summary["departments_failed"].append(source_dept.name)
+                                failed_source_ids.add(source_id)
+                                del remaining[source_id]
+                                progressed = True
+                                continue
                         LOGGER.info(
                             "department created: name=%s source_id=%s target_id=%s parent_target_id=%s dry_run=%s",
-                            source_dept.name,
+                            desired_name,
                             source_id,
                             target_id,
                             parent_target_id,
                             self.settings.dry_run,
                         )
-                        summary["departments_created"].append(source_dept.name)
+                        summary["departments_created"].append(desired_name)
                         stats.departments_created += 1
                     created_mapping[source_id] = target_id
                     if not self.settings.dry_run:
                         self.state_store.upsert_department_mapping(source_id, target_id)
                 else:
                     current = by_target_id.get(target_id)
-                    if current and (current.name != source_dept.name or (current.parent_id or "0") != parent_target_id):
+                    if current and (
+                        self._sanitize_department_name(current.name) != desired_name
+                        or (current.parent_id or "0") != parent_target_id
+                    ):
                         if not self.settings.dry_run:
-                            self.target_client.update_department(
-                                department_id=int(target_id),
-                                name=source_dept.name,
-                                parent_id=int(parent_target_id),
-                                description=description,
-                            )
+                            try:
+                                self.target_client.update_department(
+                                    department_id=int(target_id),
+                                    name=desired_name,
+                                    parent_id=int(parent_target_id),
+                                    description=description,
+                                )
+                            except RuntimeError:
+                                LOGGER.exception(
+                                    "department update failed: name=%s source_id=%s target_id=%s",
+                                    desired_name,
+                                    source_id,
+                                    target_id,
+                                )
+                                summary["departments_failed"].append(source_dept.name)
+                                del remaining[source_id]
+                                progressed = True
+                                continue
                         LOGGER.info(
                             "department updated: name=%s source_id=%s target_id=%s old_parent=%s new_parent=%s dry_run=%s",
-                            source_dept.name,
+                            desired_name,
                             source_id,
                             target_id,
                             current.parent_id or "0",
                             parent_target_id,
                             self.settings.dry_run,
                         )
-                        summary["departments_updated"].append(source_dept.name)
+                        summary["departments_updated"].append(desired_name)
                         stats.departments_updated += 1
 
                 del remaining[source_id]
@@ -151,11 +219,15 @@ class SyncService:
         return created_mapping
 
     @staticmethod
+    def _sanitize_department_name(name: str) -> str:
+        return DEPARTMENT_NAME_INVALID_CHARS.sub("", name)[:DEPARTMENT_NAME_MAX_LENGTH]
+
+    @classmethod
     def _find_department_by_name(
-        target_departments: list[Mail263Department], name: str, parent_id: str
+        cls, target_departments: list[Mail263Department], name: str, parent_id: str
     ) -> Mail263Department | None:
         for item in target_departments:
-            if item.name == name and (item.parent_id or "0") == parent_id:
+            if cls._sanitize_department_name(item.name) == name and (item.parent_id or "0") == parent_id:
                 return item
         return None
 
@@ -187,6 +259,14 @@ class SyncService:
                 if not source_user.active and departed_backup_department_id
                 else source_department_id
             )
+            if department_id == "-1":
+                LOGGER.warning(
+                    "skip user with unmapped department: userid=%s email=%s department_source_ids=%s",
+                    userid,
+                    source_user.email,
+                    source_user.department_source_ids,
+                )
+                continue
             current = target_by_userid.get(userid)
 
             if current is None:
@@ -457,6 +537,7 @@ class SyncService:
         )
         self._log_summary_examples("本轮新建部门", summary["departments_created"])
         self._log_summary_examples("本轮更新部门", summary["departments_updated"])
+        self._log_summary_examples("本轮同步失败的部门", summary["departments_failed"])
         self._log_summary_examples("本轮新建用户", summary["users_created"])
         self._log_summary_examples("本轮更新用户", summary["users_updated"])
         self._log_summary_examples("本轮禁用用户", summary["users_disabled"])
