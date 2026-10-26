@@ -168,6 +168,20 @@ class SyncTests(unittest.TestCase):
 
 
 class MailClientTests(unittest.TestCase):
+    def test_repeated_account_rows_merge_all_departments(self):
+        client = Mail263Client(Settings())
+        client._post_json = Mock(return_value=[
+            {"xmuserid": "employee@example.com", "xmname": "测试员工", "deptids": [10], "mailstatus": 1},
+            {"xmuserid": "other@example.com", "xmname": "另一个员工", "deptId": 30},
+            {"xmuserid": "employee@example.com", "xmname": "测试员工", "deptids": [20, 10], "mailstatus": 1},
+        ])
+        users = client.list_users()
+        self.assertEqual(len(users), 2)
+        self.assertEqual(users[0].userid, "employee")
+        self.assertEqual(users[0].department_ids, ["10", "20"])
+        self.assertEqual(users[0].status, 1)
+        self.assertEqual(users[1].department_ids, ["30"])
+
     def test_create_and_update_send_full_department_list(self):
         client = Mail263Client(Settings())
         client._post_json = Mock()

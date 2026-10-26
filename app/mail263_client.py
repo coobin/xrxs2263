@@ -158,7 +158,7 @@ class Mail263Client:
 
     def list_users(self) -> list[Mail263User]:
         result = self._post_json("/user/list", {"domain": self.settings.mail263_domain}) or []
-        users: list[Mail263User] = []
+        users_by_email: dict[str, Mail263User] = {}
         for item in result:
             full_email = str(item.get("xmuserid") or "").strip()
             localpart = full_email.split("@", 1)[0] if "@" in full_email else full_email
@@ -167,20 +167,26 @@ class Mail263Client:
                 department_ids = [str(dep) for dep in dept_values if dep is not None]
             else:
                 department_ids = [str(dept_values)] if dept_values not in (None, "") else []
-            users.append(
-                Mail263User(
-                    userid=localpart,
-                    full_email=full_email,
-                    full_name=str(item.get("xmname") or "").strip(),
-                    department_ids=department_ids,
-                    title=str(item.get("xmposition") or "").strip(),
-                    mobile=str(item.get("xmcell") or "").strip(),
-                    phone=str(item.get("xmtel") or "").strip(),
-                    fax=str(item.get("xmfax") or "").strip(),
-                    status=int(item.get("mailstatus")) if item.get("mailstatus") is not None else None,
-                )
+            # 263 can return one row per department for the same mailbox.
+            # Merge these before SyncService indexes the users by account.
+            current = users_by_email.get(full_email)
+            if current is not None:
+                for department_id in department_ids:
+                    if department_id not in current.department_ids:
+                        current.department_ids.append(department_id)
+                continue
+            users_by_email[full_email] = Mail263User(
+                userid=localpart,
+                full_email=full_email,
+                full_name=str(item.get("xmname") or "").strip(),
+                department_ids=department_ids,
+                title=str(item.get("xmposition") or "").strip(),
+                mobile=str(item.get("xmcell") or "").strip(),
+                phone=str(item.get("xmtel") or "").strip(),
+                fax=str(item.get("xmfax") or "").strip(),
+                status=int(item.get("mailstatus")) if item.get("mailstatus") is not None else None,
             )
-        return users
+        return list(users_by_email.values())
 
     def create_user(
         self,
