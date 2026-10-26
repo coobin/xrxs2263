@@ -253,13 +253,13 @@ class SyncService:
         for source_user in source_users:
             userid = self._to_mail263_userid(source_user.email)
             source_userids.add(userid)
-            source_department_id = self._pick_department_id(source_user, department_mapping)
-            department_id = (
-                departed_backup_department_id
+            source_department_ids = self._pick_department_ids(source_user, department_mapping)
+            department_ids = (
+                [departed_backup_department_id]
                 if not source_user.active and departed_backup_department_id
-                else source_department_id
+                else source_department_ids
             )
-            if department_id == "-1":
+            if not department_ids:
                 LOGGER.warning(
                     "skip user with unmapped department: userid=%s email=%s department_source_ids=%s",
                     userid,
@@ -281,15 +281,15 @@ class SyncService:
                     self.target_client.create_user(
                         userid=userid,
                         password=source_user.password or self.settings.sync_default_password,
-                        department_id=int(department_id),
+                        department_ids=[int(department_id) for department_id in department_ids],
                         full_name=source_user.full_name,
                     )
                     self.state_store.upsert_user_mapping(source_user.source_id, userid)
                 LOGGER.info(
-                    "user created: userid=%s email=%s department_id=%s dry_run=%s",
+                    "user created: userid=%s email=%s department_ids=%s dry_run=%s",
                     userid,
                     source_user.email,
-                    department_id,
+                    department_ids,
                     self.settings.dry_run,
                 )
                 summary["users_created"].append(f"{source_user.full_name}<{userid}>")
@@ -321,16 +321,17 @@ class SyncService:
             desired_full_name = self._desired_full_name(userid, source_user.full_name, current.full_name)
             desired_enabled = source_user.active
             current_enabled = current.status != 0 if current.status is not None else True
+            departments_changed = set(department_ids) != set(current.department_ids)
             needs_update = (
                 current.full_name != desired_full_name
-                or department_id not in current.department_ids
+                or departments_changed
                 or desired_enabled != current_enabled
             )
             if needs_update:
                 if not self.settings.dry_run:
                     self.target_client.update_user(
                         userid=userid,
-                        department_ids=[int(department_id)],
+                        department_ids=[int(department_id) for department_id in department_ids],
                         full_name=desired_full_name,
                         title=current.title,
                         mobile=current.mobile,
@@ -338,20 +339,20 @@ class SyncService:
                         enabled=desired_enabled,
                     )
                 LOGGER.info(
-                    "user updated: userid=%s email=%s old_name=%s new_name=%s old_departments=%s new_department=%s old_status=%s new_status=%s dry_run=%s",
+                    "user updated: userid=%s email=%s old_name=%s new_name=%s old_departments=%s new_departments=%s old_status=%s new_status=%s dry_run=%s",
                     userid,
                     source_user.email,
                     current.full_name,
                     desired_full_name,
                     current.department_ids,
-                    department_id,
+                    department_ids,
                     "enabled" if current_enabled else "disabled",
                     "enabled" if desired_enabled else "disabled",
                     self.settings.dry_run,
                 )
-                if current.full_name != desired_full_name or department_id not in current.department_ids:
+                if current.full_name != desired_full_name or departments_changed:
                     summary["users_updated"].append(
-                        f"{desired_full_name}<{userid}>:{current.department_ids}->{department_id}"
+                        f"{desired_full_name}<{userid}>:{current.department_ids}->{department_ids}"
                     )
                     stats.users_updated += 1
                 if not desired_enabled and current_enabled:
@@ -553,12 +554,16 @@ class SyncService:
         LOGGER.info("%s：%s%s", label, preview, suffix)
 
     @staticmethod
-    def _pick_department_id(source_user: SourceUser, department_mapping: dict[str, str]) -> str:
+    def _pick_department_ids(source_user: SourceUser, department_mapping: dict[str, str]) -> list[str]:
+        department_ids: list[str] = []
         for source_department_id in source_user.department_source_ids:
             target_id = department_mapping.get(source_department_id)
-            if target_id:
-                return target_id
-        return "-1"
+            # Never replace a user's full membership with a partially mapped list.
+            if not target_id or target_id == "-1":
+                return []
+            if target_id not in department_ids:
+                department_ids.append(target_id)
+        return department_ids
 
     @staticmethod
     def _is_disabled_departed_backup_user(user: Mail263User, department_names: dict[str, str]) -> bool:

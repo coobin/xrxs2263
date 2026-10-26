@@ -115,7 +115,8 @@ class XrxsClient:
                 f"Xinrenxinshi API request failed for {path}: "
                 f"errcode={errcode}, errmsg={response_payload.get('errmsg')}"
             )
-        return response_payload.get("data") or {}
+        data = response_payload.get("data")
+        return data if data is not None else {}
 
     def list_departments(self) -> list[SourceDepartment]:
         payload = {"timestamp": self._timestamp_ms()}
@@ -190,4 +191,72 @@ class XrxsClient:
                 break
             page_no += 1
 
+        if self.settings.xrxs_sync_part_time_departments:
+            self._add_part_time_departments(users)
         return users
+
+    def _add_part_time_departments(self, users: list[SourceUser]) -> None:
+        active_users = {user.source_id: user for user in users if user.active}
+        if not active_users:
+            return
+
+        # Discover the tenant's fixed group instead of hard-coding a group UUID.
+        groups = self._post_json(
+            self.settings.xrxs_employee_groups_endpoint,
+            {"timestamp": self._timestamp_ms()},
+        )
+        if not isinstance(groups, list):
+            raise RuntimeError("Invalid Xinrenxinshi employee groups response; sync stopped.")
+        part_time_groups = [
+            group for group in groups
+            if isinstance(group, dict)
+            and group.get("groupName") == "兼职信息"
+            and str(group.get("isFix")) == "1"
+        ]
+        if len(part_time_groups) != 1:
+            raise RuntimeError("Cannot identify Xinrenxinshi fixed 兼职信息 group; sync stopped.")
+        group_id = self._required_str(part_time_groups[0].get("groupId"), "兼职信息.groupId")
+
+        employee_ids = list(active_users)
+        for offset in range(0, len(employee_ids), 100):
+            batch = employee_ids[offset:offset + 100]
+            response = self._post_json(
+                self.settings.xrxs_employee_group_fields_endpoint,
+                {
+                    "employeeIds": batch,
+                    "groupId": group_id,
+                    "status": 0,
+                    "hasDel": 0,
+                    "timestamp": self._timestamp_ms(),
+                },
+            )
+            if not isinstance(response, list):
+                raise RuntimeError("Invalid Xinrenxinshi 兼职信息 response; sync stopped.")
+            for item in response:
+                if not isinstance(item, dict) or item.get("employeeId") not in batch:
+                    raise RuntimeError("Unexpected employee in Xinrenxinshi 兼职信息 response; sync stopped.")
+                user = active_users[item["employeeId"]]
+                records = item.get("recordDataList")
+                if not isinstance(records, list):
+                    raise RuntimeError("Invalid Xinrenxinshi 兼职信息 records; sync stopped.")
+                for record in records:
+                    fields = record.get("fields") if isinstance(record, dict) else None
+                    if not isinstance(fields, list):
+                        raise RuntimeError("Invalid Xinrenxinshi 兼职信息 fields; sync stopped.")
+                    for field in fields:
+                        if not isinstance(field, dict):
+                            raise RuntimeError("Invalid Xinrenxinshi 兼职信息 field; sync stopped.")
+                        if field.get("fieldIdName") != "兼职部门":
+                            continue
+                        value = field.get("fieldValue")
+                        if value is not None and not isinstance(value, str):
+                            raise RuntimeError("Invalid Xinrenxinshi 兼职部门 ID; sync stopped.")
+                        department_id = self._optional_str(value)
+                        if department_id and department_id not in user.department_source_ids:
+                            user.department_source_ids.append(department_id)
+
+        LOGGER.info(
+            "兼职部门读取完成：在职员工 %s，包含兼职部门员工 %s",
+            len(active_users),
+            sum(len(user.department_source_ids) > 1 for user in active_users.values()),
+        )

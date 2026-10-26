@@ -53,6 +53,9 @@ class Settings(BaseModel):
     xrxs_employee_base_info_endpoint: str = "/api/employees/base_info/"
     xrxs_page_size: int = 100
     xrxs_fetch_child_departments: bool = True
+    xrxs_sync_part_time_departments: bool = True
+    xrxs_employee_groups_endpoint: str = "/v5/employee/group/info"
+    xrxs_employee_group_fields_endpoint: str = "/v5/employee/group/employee/fields"
     xrxs_company_id: str = ""
 
     mail263_wsdl_url: str = ""

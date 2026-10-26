@@ -10,6 +10,7 @@
 - 从 263 邮箱读取现有部门和用户。
 - 自动创建或更新 263 部门。
 - 自动创建或更新 263 用户。
+- 同一个邮箱账号同时归属员工主部门和兼职部门，支持多个兼职部门。
 - 支持员工离职/停用后禁用对应 263 账号，并移动到 `离职待备份` 部门。
 - 支持将薪人薪事中已缺失的 263 账号禁用并移动到 `离职待备份` 部门。
 - 支持姓名例外名单，适合保留 263 中少数重名用户的备注显示名。
@@ -45,9 +46,18 @@
 - token 接口：`POST /authorize/oauth/token`
 - 部门接口：`POST /v5/department/list`
 - 员工接口：`POST /v5/employee/list`
+- 员工分组接口：`POST /v5/employee/group/info`，用于识别固定的“兼职信息”分组。
+- 兼职记录接口：`POST /v5/employee/group/employee/fields`，每批最多查询 100 名在职员工，排除已删除记录。
 - 签名方式：`HMAC-SHA1(AppSecret, raw_json_body)` 后 `base64`，再 URL encode 放到 `sign` 查询参数
 
 如果你的租户需要自定义 `companyId` 或不同接口路径，可以通过 `.env` 配置调整。
+
+兼职同步默认开启（`XRXS_SYNC_PART_TIME_DEPARTMENTS=true`）。应用需要获得上述两个员工分组接口的读取权限，并能够读取“兼职部门”字段。
+接口约定参见薪人薪事官方文档：[获取所有分组](https://api.xinrenxinshi.com/doc/v3/page/employee/group/groupInfo_v5.html)、[获取员工分组的字段值](https://api.xinrenxinshi.com/doc/v3/page/employee/group/employeeFieldInfo2_v5.html)。
+如果返回 `910002`（没有访问该接口的权限），须先在薪人薪事开放平台给当前应用授权。
+默认使用已验证可用的 `/fields` 接口；租户若授权的是 `/fields2`，可设置 `XRXS_EMPLOYEE_GROUP_FIELDS_ENDPOINT=/v5/employee/group/employee/fields2`，两者使用相同的分组记录解析逻辑。
+兼职读取失败或返回格式异常时，本轮同步在写入 263 之前停止；不会把读取失败当成兼职取消。
+暂时不具备权限时，可显式设置 `XRXS_SYNC_PART_TIME_DEPARTMENTS=false` 关闭兼职读取，仅按主部门同步。
 
 ## 快速开始
 
@@ -141,6 +151,9 @@ TIMEZONE=Asia/Shanghai
 
 - 只处理能通过邮箱账号匹配上的用户。
 - 现有用户只同步姓名、部门、启用/禁用状态。
+- 在职员工的部门以薪人薪事为准：主部门在前，追加所有兼职部门并去重；新建、更新邮箱均写入完整部门列表，不创建重复账号。
+- 兼职取消后，下次同步会移除对应的旧部门归属；仅部门顺序不同不会重复更新。
+- 主部门或任一兼职部门无法映射到 263 时，跳过该员工的更新，避免用不完整的部门列表覆盖已有归属。
 - 不同步职位、手机、电话。
 - 不匹配薪人薪事的 263 账号默认会禁用，并移动到 `离职待备份` 部门；如设置 `SYNC_DISABLE_ABSENT_USERS=false` 则跳过。
 - 如果用户在薪人薪事中是离职/停用状态，并且能匹配到 263 账号，则会禁用该 263 账号，并移动到 `离职待备份` 部门。
